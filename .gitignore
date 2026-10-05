@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Scraper reports and logs
+*.csv
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
