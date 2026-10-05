@@ -24,7 +24,8 @@ Sites that fail to load are retried once in a fresh browser before they are repo
 
 Chrome is driven through nodriver (plain CDP, no webdriver), which is what lets
 it pass Cloudflare. Headless Chrome does not pass, so the browser runs as a
-normal window on a private virtual screen (Xvfb): nothing appears on the desktop.
+normal window that is kept out of sight: on Linux on a private virtual screen
+(Xvfb), on Windows positioned far off-screen (only a taskbar button shows).
 It uses a throwaway profile that is deleted on exit, so no history is kept.
 Pass --show to watch the browser on the real screen instead.
 """
@@ -545,7 +546,7 @@ def main():
     parser.add_argument("--cf-timeout", type=int, default=45, help="seconds to wait for a Cloudflare check (default: %(default)s)")
     parser.add_argument("--restart-every", type=int, default=60, metavar="N",
                         help="start a fresh browser every N sites (default: %(default)s)")
-    parser.add_argument("--show", action="store_true", help="show the browser window instead of running it on a hidden virtual screen")
+    parser.add_argument("--show", action="store_true", help="show the browser window instead of keeping it out of sight")
     args = parser.parse_args()
     try:
         args.first_page = start_page(args.url)
@@ -561,7 +562,17 @@ def main():
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, interrupt)
 
-    xvfb = None if args.show else start_virtual_display()
+    for stream in (sys.stdout, sys.stderr):  # tool names with emoji etc. must not crash a Windows console
+        stream.reconfigure(errors="replace")
+
+    xvfb = None
+    if not args.show:
+        if sys.platform.startswith("linux"):
+            xvfb = start_virtual_display()
+        else:
+            # No Xvfb on Windows/macOS: park the window far off-screen instead (same spot Windows
+            # uses for minimized windows). Only its taskbar button remains.
+            BROWSER_ARGS.append("--window-position=-32000,-32000")
     profile = tempfile.mkdtemp(prefix="toolify_scraper_")  # throwaway profiles: no history survives the run
     try:
         uc.loop().run_until_complete(run(args, profile))
@@ -570,13 +581,17 @@ def main():
     finally:
         for pid in RUNNING_BROWSERS:  # only non-empty when the run was interrupted
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))  # no SIGKILL on Windows
             except OSError:
                 pass
-        for _ in range(10):  # a dying Chrome can write its profile back for a moment
+        # A Chrome that is still shutting down writes parts of its profile back,
+        # so keep deleting until the folder has stayed gone for a while.
+        gone = 0
+        for _ in range(30):
             shutil.rmtree(profile, ignore_errors=True)
             time.sleep(0.5)
-            if not os.path.exists(profile):
+            gone = 0 if os.path.exists(profile) else gone + 1
+            if gone >= 4:
                 break
         if xvfb:
             xvfb.terminate()
